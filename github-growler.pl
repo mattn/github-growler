@@ -4,13 +4,55 @@ use warnings;
 use 5.008001;
 use App::Cache;
 use Encode;
-use Mac::Growl;
 use File::Copy;
 use LWP::Simple;
 use URI;
 use XML::Feed;
 
 $XML::Atom::ForceUnicode = 1;
+
+our $growl = bless({ instance => undef }, "Github::Growler");
+BEGIN {
+  if (eval { require Mac::Growl }) {
+    *Github::Growler::register = sub {
+      my ($self, $appname, $events) = @_;
+      Mac::Growl::RegisterNotifications($appname, [ @$events, 'Error' ], $events);
+    };
+    *Github::Growler::notify = sub {
+      my ($self, $appname, $event, $title, $message, $icon) = @_;
+      Mac::Growl::PostNotification($appname, $event, $title, $message, 0, 0, $icon);
+    };
+  } elsif (eval { require Desktop::Notify }) {
+    *Github::Growler::register = sub {
+      my ($self, $appname, $events) = @_;
+      $self->{instance} = Desktop::Notify->new(("app_name" => $appname));
+    };
+    *Github::Growler::notify = sub {
+      my ($self, $appname, $event, $title, $message, $icon) = @_;
+      $self->{instance}->create(body => $message, summary => $title, app_icon => $icon);
+    };
+  } elsif (eval { require Net::GrowlClient }) {
+    *Github::Growler::register = sub {
+      my ($self, $appname, $events) = @_;
+      push @$events, 'Error';
+      $self->{instance} = Net::GrowlClient->init(
+          CLIENT_TYPE_REGISTRATION => 0,
+          CLIENT_TYPE_NOTIFICATION => 1,
+          CLIENT_PASSWORD => '',
+          CLIENT_APPLICATION_NAME => $appname,
+          CLIENT_NOTIFICATION_LIST => $events
+      );
+    };
+    *Github::Growler::notify = sub {
+      my ($self, $appname, $event, $title, $message, $icon) = @_;
+      $self->{instance}->notify(
+          title => $title,
+          message => $message,
+          notification => $event);
+    };
+  }
+  local $^W = 0;
+}
 
 my %events = (
     "New Commits" => qr/(?:pushed to|committed to)/,
@@ -28,7 +70,7 @@ my $AppDomain = "net.bulknews.GitHubGrowler";
 
 my $AppName = "Github Growler";
 my @events  = ((keys %events), "Misc");
-Mac::Growl::RegisterNotifications($AppName, [ @events, 'Error' ], \@events);
+$growl->register($AppName, \@events);
 
 my $TempDir = "$ENV{HOME}/Library/Caches/$AppDomain";
 mkdir $TempDir, 0777 unless -e $TempDir;
@@ -89,7 +131,7 @@ sub growl_feed {
                  "http://github.com/$user.private.actor.atom?token=$token") {
         my $feed = eval { XML::Feed->parse(URI->new($uri)) };
         unless ($feed) {
-            Mac::Growl::PostNotification($AppName, "Error", $AppName, "Can't parse the feed $uri", 0, 0, $AppIcon);
+            $growl->notify($AppName, "Error", $AppName, "Can't parse the feed $uri", $AppIcon);
             next;
         }
 
@@ -126,7 +168,7 @@ sub growl_feed {
                 $description .= ": $body" if $body;
                 $icon = $stuff->{user}{avatar} ? "$stuff->{user}{avatar}" : $AppIcon;
             }
-            Mac::Growl::PostNotification($AppName, $event, encode_utf8($title), encode_utf8($description), 0, 0, $icon);
+            $growl->notify($AppName, $event, encode_utf8($title), encode_utf8($description), $icon);
             last if $last;
         }
     }
